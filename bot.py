@@ -7,8 +7,8 @@ from datetime import datetime
 # ------------------------------
 # Telegram
 # ------------------------------
-TOKEN = "8546366016:AAEWSe8vsdlBhyboZzOgcPb8h9cDSj09A80"
-CHAT_ID = "6590452577"
+TOKEN = "ВАШ_ТЕЛЕГРАМ_ТОКЕН"
+CHAT_ID = "ВАШ_CHAT_ID"
 
 def send_message(text):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
@@ -35,10 +35,10 @@ exchanges = {
 # ------------------------------
 # Настройки
 # ------------------------------
-SPREAD_THRESHOLD = 2  # минимальный спред (0.01%)
-MIN_VOLUME = 200           # минимальный объём в стакане
-CHECK_INTERVAL = 60        # период проверки в секундах
-MAX_COINS = 100             # для теста первые 50 монет
+SPREAD_THRESHOLD = 0.02  # 2%
+MIN_VOLUME = 200          # минимальный объём в стакане
+CHECK_INTERVAL = 60       # интервал проверки, сек
+MAX_COINS = 50            # для теста первые 50 монет
 
 # ------------------------------
 # Загружаем монеты с бирж
@@ -49,21 +49,19 @@ for ex_id, ex in exchanges.items():
     try:
         markets = ex.load_markets()
         exchange_symbols[ex_id] = list(markets.keys())
-        print(f"✔️ {ex_id.upper()} загружено {len(exchange_symbols[ex_id])} монет")
+        print(f"✔ {ex_id.upper()} загружено {len(exchange_symbols[ex_id])} монет")
     except Exception as e:
         exchange_symbols[ex_id] = []
         print(f"❌ Ошибка {ex_id}: {e}")
 
 # Находим общие монеты для всех бирж
 common_symbols = set(exchange_symbols['kucoin'])
-for ex_id in ['bitrue', 'bitmart']:
+for ex_id in exchanges.keys():
     common_symbols = common_symbols.intersection(exchange_symbols[ex_id])
 common_symbols = sorted(list(common_symbols))[:MAX_COINS]
 
 print("\n==============================")
-print("🔍 ФИЛЬТРАЦИЯ ПО ОБЪЕМУ > 200$")
-print("==============================")
-print(f"Выбрано {len(common_symbols)} монет для проверки.\n")
+print(f"🔍 Выбрано {len(common_symbols)} монет для проверки.\n")
 
 # ------------------------------
 # Функция проверки объёма в стакане
@@ -73,13 +71,7 @@ def get_orderbook_volume(ex, symbol):
         ob = ex.fetch_order_book(symbol)
         bid_volume = sum([p*a for p,a in ob['bids'][:5]])
         ask_volume = sum([p*a for p,a in ob['asks'][:5]])
-        return max(bid_volume, ask_volume) 
-        msg = f"🔥 Арбитраж! {symbol}\nКупить: {min_ex} → {min_price:.2f}\nПродать: {max_ex} → {max_price:.2f}\nСПРЕД: {spread*100:.2f}%\nОбъём: {max(volumes):.2f} USD"
-
-    # Пока просто добавим текст
-network_info = "Сеть: USDT-ERC20 (пример)"
-msg += f"\n{network_info}"
-
+        return max(bid_volume, ask_volume)
     except:
         return 0
 
@@ -112,9 +104,18 @@ while True:
         spread = (max_price - min_price) / min_price
 
         if spread >= SPREAD_THRESHOLD:
-            msg = f"🔥 Арбитраж! {symbol}\nКупить: {min_ex} → {min_price:.2f}\nПродать: {max_ex} → {max_price:.2f}\nСПРЕД: {spread*100:.2f}%"
+            network_info = "Сеть: TBD"  # placeholder, позже можно подключить API бирж
+            msg = (
+                f"🔥 Арбитраж! {symbol}\n"
+                f"Купить: {min_ex} → {min_price:.2f}\n"
+                f"Продать: {max_ex} → {max_price:.2f}\n"
+                f"СПРЕД: {spread*100:.2f}%\n"
+                f"Объём: {max(volumes):.2f} USD\n"
+                f"{network_info}"
+            )
             print(msg)
             send_message(msg)
         else:
             print(f"{symbol}: spread={spread*100:.2f}% — ниже порога")
     time.sleep(CHECK_INTERVAL)
+
