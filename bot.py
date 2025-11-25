@@ -25,7 +25,11 @@ def send_message(text):
 exchanges = {
     'kucoin': ccxt.kucoin(),
     'bitrue': ccxt.bitrue(),
-    'bitmart': ccxt.bitmart()
+    'bitmart': ccxt.bitmart(),
+    'gateio': ccxt.gateio(),
+    'poloniex': ccxt.poloniex(),
+    'htx': ccxt.htx(),       # или 'huobi' если 'htx' не работает
+    'bybit': ccxt.bybit()
 }
 
 # ------------------------------
@@ -69,7 +73,13 @@ def get_orderbook_volume(ex, symbol):
         ob = ex.fetch_order_book(symbol)
         bid_volume = sum([p*a for p,a in ob['bids'][:5]])
         ask_volume = sum([p*a for p,a in ob['asks'][:5]])
-        return max(bid_volume, ask_volume)
+        return max(bid_volume, ask_volume) 
+        msg = f"🔥 Арбитраж! {symbol}\nКупить: {min_ex} → {min_price:.2f}\nПродать: {max_ex} → {max_price:.2f}\nСПРЕД: {spread*100:.2f}%\nОбъём: {max(volumes):.2f} USD"
+
+    # Пока просто добавим текст
+network_info = "Сеть: USDT-ERC20 (пример)"
+msg += f"\n{network_info}"
+
     except:
         return 0
 
