@@ -1,161 +1,127 @@
 import ccxt
-import pandas as pd
 import requests
 import time
-from datetime import datetime, UTC
+from datetime import datetime, timezone
 
-# --------------------------------
+# ------------------------------
 # Telegram
-# --------------------------------
+# ------------------------------
 TOKEN = "8546366016:AAEWSe8vsdlBhyboZzOgcPb8h9cDSj09A80"
 CHAT_ID = "6590452577"
-OWNER = "@Fgfgfgggffgg"
 
 def send_message(text):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": text,
-        "parse_mode": "HTML"
-    }
+    payload = {"chat_id": CHAT_ID, "text": text}
     try:
-        r = requests.post(url, data=payload)
-        return r.json()
-    except Exception as e:
-        print("Ошибка Telegram:", e)
+        requests.post(url, data=payload)
+    except:
+        pass
 
-# --------------------------------
-# Биржи
-# --------------------------------
-
-# 🔥 HTX — через API ключи (только для чтения)
-HTX_API_KEY = "6b42ef88-vfd5ghr532-b4405eb0-8028a"
-HTX_SECRET  = "f1c7cce3-8ca53bf4-e54117a9c32b5"
-
+# ------------------------------
+# Биржи (публичные)
+# ------------------------------
 exchanges = {
     'kucoin': ccxt.kucoin(),
     'bitrue': ccxt.bitrue(),
     'bitmart': ccxt.bitmart(),
     'gateio': ccxt.gateio(),
-    'poloniex': ccxt.poloniex(),
-    'htx': ccxt.huobi({
-        "apiKey": HTX_API_KEY,
-        "secret": HTX_SECRET
-    })
+    'poloniex': ccxt.poloniex()
 }
 
-# --------------------------------
+# ------------------------------
 # Настройки
-# --------------------------------
-SPREAD_THRESHOLD = 0.02  # 2%
-MIN_VOLUME = 300
+# ------------------------------
+SPREAD_THRESHOLD = 0.015
+MAX_COINS = 150
 CHECK_INTERVAL = 60
-MAX_COINS = 100  # максимум монет
+MIN_VOLUME = 200
 
-# ❗ Токены которые мы НЕ анализируем
-BAN_PATTERNS = [
-    "3L", "3S", "5L", "5S",
-    "UP", "DOWN",
-    "BULL", "BEAR",
-    "ETF", 
-    "PERP", "-", "FUTURE"
-]
+# ------------------------------
+# Загружаем USDT пары
+# ------------------------------
+print("📌 Загружаю пары (USDT)...")
+exchange_pairs = {}
 
-def is_allowed_symbol(symbol):
-    if not symbol.endswith("/USDT"):
-        return False
-    for bad in BAN_PATTERNS:
-        if bad in symbol.upper():
-            return False
-    return True
-
-# --------------------------------
-# Загружаем пары
-# --------------------------------
-print("📌 Загружаю пары (чистый USDT)...")
-
-exchange_symbols = {}
-
-for ex_id, ex in exchanges.items():
+for ex_name, ex in exchanges.items():
     try:
         markets = ex.load_markets()
-        symbols = [s for s in markets if is_allowed_symbol(s)]
-        exchange_symbols[ex_id] = symbols
-        print(f"✔ {ex_id.upper()} — {len(symbols)} символов /USDT")
+        usdt_pairs = [s for s in markets if s.endswith("/USDT")]
+        exchange_pairs[ex_name] = usdt_pairs
+        print(f"✔ {ex_name.upper()} — {len(usdt_pairs)} символов /USDT")
     except Exception as e:
-        exchange_symbols[ex_id] = []
-        print(f"❌ Ошибка {ex_id}: {e}")
+        exchange_pairs[ex_name] = []
+        print(f"❌ Ошибка {ex_name}: {e}")
 
-# Общие символы
-common = set(exchange_symbols['kucoin'])
-for ex_id in exchanges:
-    common = common.intersection(exchange_symbols[ex_id])
+# ------------------------------
+# Общие пары
+# ------------------------------
+common = set(exchange_pairs['kucoin'])
+for ex in exchange_pairs:
+    common = common.intersection(exchange_pairs[ex])
 
 common = sorted(list(common))[:MAX_COINS]
+print(f"🔍 Выбрано {len(common)} общих пар /USDT (лимит {MAX_COINS})")
 
-print(f"🔍 Выбрано {len(common)} общих пар /USDT")
-
-# --------------------------------
-# Объём из стакана
-# --------------------------------
-def get_volume(ex, symbol):
+# ------------------------------
+# Функция объёмов
+# ------------------------------
+def volume(ex, symbol):
     try:
         ob = ex.fetch_order_book(symbol)
-        bid_vol = sum([p * a for p, a in ob['bids'][:5]])
-        ask_vol = sum([p * a for p, a in ob['asks'][:5]])
-        return max(bid_vol, ask_vol)
+        return sum([p*a for p,a in ob['bids'][:3]]) + sum([p*a for p,a in ob['asks'][:3]])
     except:
         return 0
 
-# --------------------------------
-# Основной цикл
-# --------------------------------
-print("📌 Старт сканера...\n")
+# ------------------------------
+# Основной сканер
+# ------------------------------
+print("📌 Старт сканера...")
 
 while True:
-    print(datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC"))
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    print(now)
 
     for symbol in common:
-        volumes = []
-        for ex_id, ex in exchanges.items():
-            volumes.append(get_volume(ex, symbol))
 
-        if any(v < MIN_VOLUME for v in volumes):
-            continue
-
+        # Сбор цен
         prices = {}
-        for ex_id, ex in exchanges.items():
+        vols = {}
+
+        for ex_name, ex in exchanges.items():
             try:
-                t = ex.fetch_ticker(symbol)
-                px = t.get("last") or t.get("close")
-                if px:
-                    prices[ex_id] = px
+                ticker = ex.fetch_ticker(symbol)
+                price = ticker.get("last") or ticker.get("close")
+                if price:
+                    prices[ex_name] = price
+                    vols[ex_name] = volume(ex, symbol)
             except:
                 pass
 
         if len(prices) < 2:
             continue
 
-        buy_ex = min(prices, key=prices.get)
-        sell_ex = max(prices, key=prices.get)
-        p_buy = prices[buy_ex]
-        p_sell = prices[sell_ex]
+        # Проверка объемов
+        if any(v < MIN_VOLUME for v in vols.values()):
+            continue
 
-        spread = (p_sell - p_buy) / p_buy
+        low_ex = min(prices, key=prices.get)
+        high_ex = max(prices, key=prices.get)
+        low_price = prices[low_ex]
+        high_price = prices[high_ex]
+
+        spread = (high_price - low_price) / low_price
 
         if spread >= SPREAD_THRESHOLD:
             msg = (
-                f"🔥 <b>Арбитраж найден!</b>\n"
-                f"<b>{symbol}</b>\n"
-                f"Купить: {buy_ex} → <b>{p_buy}</b>\n"
-                f"Продать: {sell_ex} → <b>{p_sell}</b>\n"
-                f"СПРЕД: <b>{spread*100:.2f}%</b>\n"
-                f"Объём: <b>{max(volumes):.2f} USD</b>\n"
-                f"Проверить: /check_{symbol.replace('/', '_')}\n"
-                f"Время: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S UTC')}"
+                f"🔥 Арбитраж! {symbol}\n"
+                f"Купить: {low_ex} → {low_price:.8f}\n"
+                f"Продать: {high_ex} → {high_price:.8f}\n"
+                f"СПРЕД: {spread*100:.4f}%\n"
+                f"Объём (USD): {max(vols.values()):.2f}\n"
+                f"Проверить актуальность: /check_{symbol.replace('/','_')}\n"
+                f"Время: {now}"
             )
             print(msg)
             send_message(msg)
 
     time.sleep(CHECK_INTERVAL)
-
