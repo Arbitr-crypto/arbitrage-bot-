@@ -7,8 +7,8 @@ import json
 # --------------------------
 # Telegram
 # --------------------------
-TOKEN = "ТОКЕН_ТУТ"
-CHAT_ID = "CHAT_ID"
+TOKEN = "8546366016:AAEWSe8vsdlBhyboZzOgcPb8h9cDSj09A80"
+CHAT_ID = "6590452577"
 
 TG_URL = f"https://api.telegram.org/bot{TOKEN}"
 
