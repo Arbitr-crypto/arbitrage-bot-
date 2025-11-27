@@ -18,12 +18,12 @@ from telegram.ext import (
 # ------------------------------
 # ВАЖНО: в Railway добавь переменные окружения с такими именами:
 # TELEGRAM_TOKEN, OWNER_CHAT_ID, OPERATOR_ID, SPREAD_THRESHOLD, MIN_VOLUME_USD, MAX_COINS, CHECK_INTERVAL, ARBI_DB
-TELEGRAM_TOKEN = os.environ.get("8546366016:AAEWSe8vsdlBhyboZzOgcPb8h9cDSj09A80")  # например: "12345:ABC..."
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")  # например: "12345:ABC..."
 if not TELEGRAM_TOKEN:
     raise RuntimeError("TELEGRAM_TOKEN не задан в env vars")
 
-OWNER_CHAT_ID = int(os.environ.get("6590452577", "0"))
-OPERATOR_ID = int(os.environ.get("8193755967", "0"))
+OWNER_CHAT_ID = int(os.environ.get("OWNER_CHAT_ID", "0"))
+OPERATOR_ID = int(os.environ.get("OPERATOR_ID", "0"))
 
 # Биржи (как в твоём коде)
 EXCHANGE_IDS = ['kucoin', 'bitrue', 'bitmart', 'gateio', 'poloniex']
