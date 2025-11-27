@@ -21,7 +21,7 @@ from telegram.ext import (
 # ------------------------------
 # Рекомендуемый способ — задать TELEGRAM_TOKEN в переменных окружения на Railway или хостинге.
 # Для быстрой проверки локально можно временно вставить токен прямо сюда (НЕ публикуй).
-TELEGRAM_TOKEN = 8546366016:AAEWSe8vsdlBhyboZzOgcPb8h9cDSj09A80 # <- поставь токен в env vars
+TELEGRAM_TOKEN = "8546366016:AAEWSe8vsdlBhyboZzOgcPb8h9cDSj09A80" # <- поставь токен в env vars
 # TELEGRAM_TOKEN = "1234567:ABC..."  # пример для локальной отладки (временно)
 
 if not TELEGRAM_TOKEN:
