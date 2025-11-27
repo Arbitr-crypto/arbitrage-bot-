@@ -1,45 +1,60 @@
-  # bot.py — обновлённый арбитражный бот с whitelist, оператором и кнопкой "Проверить спред"
+# bot.py — исправленный арбитражный бот (версия для запуска на Railway / локально)
 import os
 import ccxt
-import json
 import time
 import sqlite3
+import asyncio
 from datetime import datetime, timezone
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+    CallbackQueryHandler,
+)
 
 # ------------------------------
-# Конфигурация (через env vars на Railway)
+# Конфигурация через переменные окружения (Railway)
 # ------------------------------
-TELEGRAM_TOKEN = os.environ.get("8546366016:AAEWSe8vsdlBhyboZzOgcPb8h9cDSj09A80")  # обязателен
-OWNER_CHAT_ID = int(os.environ.get("6590452577", "0"))  # твой Telegram ID (владелец)
-OPERATOR_ID = int(os.environ.get("8193755967", "0"))      # ID оператора (может управлять whitelist)
+# ВАЖНО: в Railway добавь переменные окружения с такими именами:
+# TELEGRAM_TOKEN, OWNER_CHAT_ID, OPERATOR_ID, SPREAD_THRESHOLD, MIN_VOLUME_USD, MAX_COINS, CHECK_INTERVAL, ARBI_DB
+TELEGRAM_TOKEN = os.environ.get("8546366016:AAEWSe8vsdlBhyboZzOgcPb8h9cDSj09A80")  # например: "12345:ABC..."
+if not TELEGRAM_TOKEN:
+    raise RuntimeError("TELEGRAM_TOKEN не задан в env vars")
 
-# Биржи — публичный доступ (если потом добавишь ключи, расскажу как)
+OWNER_CHAT_ID = int(os.environ.get("6590452577", "0"))
+OPERATOR_ID = int(os.environ.get("8193755967", "0"))
+
+# Биржи (как в твоём коде)
 EXCHANGE_IDS = ['kucoin', 'bitrue', 'bitmart', 'gateio', 'poloniex']
 
-# Параметры фильтрации (можешь менять)
+# Параметры фильтрации и лимиты
 SPREAD_THRESHOLD = float(os.environ.get("SPREAD_THRESHOLD", 0.015))  # 1.5%
 MIN_VOLUME_USD = float(os.environ.get("MIN_VOLUME_USD", 1500))       # 1500 USDT
 MAX_COINS = int(os.environ.get("MAX_COINS", 150))                    # 150 пар
 CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", 60))           # сек
 
-# Файл/БД для whitelist (используем SQLite для сохранности)
+# БД файл
 DB_FILE = os.environ.get("ARBI_DB", "arbi_data.db")
 
 # ------------------------------
-# Инициализация CCXT (публичные клиенты)
+# Инициализация CCXT клиентов (публичные)
 # ------------------------------
 exchanges = {}
 for ex_id in EXCHANGE_IDS:
     try:
         ex_cls = getattr(ccxt, ex_id)
-        exchanges[ex_id] = ex_cls({'enableRateLimit': True})
+        # включаем rate limit, ставим дефолтные опции (spot)
+        exchanges[ex_id] = ex_cls({
+            'enableRateLimit': True,
+            # при необходимости можно добавить 'options': {'defaultType':'spot'}
+        })
+        print(f"Инициализирован {ex_id}")
     except Exception as e:
         print(f"Ошибка инициализации {ex_id}: {e}")
 
 # ------------------------------
-# Инициализация БД (SQLite) для whitelist и сохранения последних сигналов
+# Инициализация БД (SQLite)
 # ------------------------------
 conn = sqlite3.connect(DB_FILE, check_same_thread=False)
 cur = conn.cursor()
@@ -63,7 +78,7 @@ CREATE TABLE IF NOT EXISTS signals (
 conn.commit()
 
 # ------------------------------
-# Утилиты: whitelist управление
+# Утилиты: whitelist
 # ------------------------------
 def is_whitelisted(tg_id: int) -> bool:
     cur.execute("SELECT 1 FROM whitelist WHERE tg_id=?", (tg_id,))
@@ -83,47 +98,45 @@ def list_whitelist():
     return cur.fetchall()
 
 # ------------------------------
-# Фильтры "мусора" — удаляем левередж-токены, пары не /USDT и т.п.
+# Фильтрация символов (как у тебя)
 # ------------------------------
 def is_valid_symbol(symbol: str) -> bool:
-    # Только USDT (строго)
     if not symbol.endswith("/USDT"):
         return False
-    # исключаем маркеры левереджа/ETF
     bad_keywords = ['3S','3L','UP','DOWN','BULL','BEAR','ETF','HALF','MOON','INVERSE']
     up = symbol.upper()
     for b in bad_keywords:
         if b in up:
             return False
-    # простая длина и формат - исключаем weird names
-    if len(symbol.split("/")[0]) < 2 or len(symbol.split("/")[0]) > 20:
+    base = symbol.split("/")[0]
+    if len(base) < 2 or len(base) > 20:
         return False
     return True
 
 # ------------------------------
-# Вспомогательные: вычисление объёма в USD (по топ-3 ордерам)
+# Объём в USD (примерно по топ-3 уровней)
 # ------------------------------
 def orderbook_volume_usd(exchange, symbol):
     try:
         ob = exchange.fetch_order_book(symbol, limit=5)
-        bid_vol = sum([p*a for p,a in ob.get('bids', [])[:3]])
-        ask_vol = sum([p*a for p,a in ob.get('asks', [])[:3]])
+        bid_vol = sum([p * a for p, a in ob.get('bids', [])[:3]])
+        ask_vol = sum([p * a for p, a in ob.get('asks', [])[:3]])
         return max(bid_vol, ask_vol)
     except Exception:
         return 0.0
 
 # ------------------------------
-# Telegram: сообщение о найденном спреде + inline кнопка "Проверить спред"
+# Отправка сигнала с inline-кнопкой
 # ------------------------------
 async def send_signal_to_whitelist(app, text, symbol, buy_ex, sell_ex, initial_spread):
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("Проверить спред", callback_data=f"check|{symbol}|{buy_ex}|{sell_ex}")]
     ])
-    # сохраняем сигнал в БД, чтобы можно было сравнивать при проверке
+    # Сохраняем сигнал
     cur.execute("INSERT INTO signals (symbol, buy_ex, sell_ex, initial_spread, initial_time) VALUES (?, ?, ?, ?, ?)",
                 (symbol, buy_ex, sell_ex, float(initial_spread), datetime.now(timezone.utc).isoformat()))
     conn.commit()
-    # отправляем всем из whitelist
+    # Отправляем всем из whitelist
     cur.execute("SELECT tg_id FROM whitelist")
     rows = cur.fetchall()
     for (tg_id,) in rows:
@@ -133,47 +146,52 @@ async def send_signal_to_whitelist(app, text, symbol, buy_ex, sell_ex, initial_s
             print(f"Не удалось отправить сигнал {tg_id}: {e}")
 
 # ------------------------------
-# Callback для inline-кнопки "Проверить спред"
+# Callback обработчик для кнопки "Проверить спред"
 # ------------------------------
 async def check_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    data = query.data  # формат check|SYMBOL|BUY_EX|SELL_EX
-    _, symbol, buy_ex, sell_ex = data.split("|")
-    user_id = query.from_user.id
-
-    # проверка прав
-    if not is_whitelisted(user_id) and user_id not in (OWNER_CHAT_ID, OPERATOR_ID):
-        await query.message.reply_text(f"🚫 У вас нет доступа. Свяжитесь с @{os.environ.get('OWNER_USERNAME', 'owner')}")
+    data = query.data
+    try:
+        _, symbol, buy_ex, sell_ex = data.split("|")
+    except Exception:
+        await query.message.reply_text("Некорректные данные в callback.")
         return
 
-    # получаем текущие цены
+    user_id = query.from_user.id
+    if not is_whitelisted(user_id) and user_id not in (OWNER_CHAT_ID, OPERATOR_ID):
+        await query.message.reply_text("🚫 У вас нет доступа.")
+        return
+
     try:
         buy_client = exchanges[buy_ex]
         sell_client = exchanges[sell_ex]
+    except KeyError:
+        await query.message.reply_text("Ошибка: одна из бирж недоступна в конфигурации.")
+        return
+
+    try:
         ob_buy = buy_client.fetch_order_book(symbol, limit=5)
         ob_sell = sell_client.fetch_order_book(symbol, limit=5)
-        ask_price = ob_buy['asks'][0][0] if ob_buy['asks'] else None
-        bid_price = ob_sell['bids'][0][0] if ob_sell['bids'] else None
     except Exception as e:
         await query.message.reply_text(f"❗ Ошибка получения данных: {e}")
         return
 
+    ask_price = ob_buy.get('asks')[0][0] if ob_buy.get('asks') else None
+    bid_price = ob_sell.get('bids')[0][0] if ob_sell.get('bids') else None
+
     if not ask_price or not bid_price:
-        await query.message.reply_text("❗ Не удалось получить лучшую цену на одной из бирж.")
+        await query.message.reply_text("❗ Не удалось получить лучшие цены.")
         return
 
     current_spread = (bid_price - ask_price) / ask_price
-    # извлечём последний сигнал для этой пары из БД (самый последний по symbol+buy/sell)
     cur.execute("SELECT initial_spread, initial_time FROM signals WHERE symbol=? AND buy_ex=? AND sell_ex=? ORDER BY id DESC LIMIT 1",
                 (symbol, buy_ex, sell_ex))
     row = cur.fetchone()
     initial_spread = row[0] if row else None
     initial_time = row[1] if row else None
 
-    # Сравнение и формирование ответа
     if initial_spread is None:
-        # нет информации — просто вывести текущий спред
         text = (f"🔄 Актуальный спред для {symbol}:\n"
                 f"Купить: {buy_ex} → {ask_price:.6f}\n"
                 f"Продать: {sell_ex} → {bid_price:.6f}\n"
@@ -195,16 +213,15 @@ async def check_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"{cmp_text}\n"
                 f"Первый сигнал: {initial_spread*100:.4f}% (в {initial_time})")
 
-    # Добавим информацию по объёму и предложенную сеть (placeholder)
     v_buy = orderbook_volume_usd(exchanges[buy_ex], symbol)
     v_sell = orderbook_volume_usd(exchanges[sell_ex], symbol)
     text += f"\nОбъём (approx USD): buy={v_buy:.2f}, sell={v_sell:.2f}"
-    text += f"\nРекомендуемая сеть: TBD (будет подключено API бирж для вывода)"
+    text += f"\nРекомендуемая сеть: TBD"
 
     await query.message.reply_text(text)
 
 # ------------------------------
-# Команды управления whitelist (доступно владельцу и оператору)
+# Команды для управления whitelist
 # ------------------------------
 async def cmd_add_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caller = update.effective_user.id
@@ -249,10 +266,10 @@ async def cmd_list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(txt)
 
 # ------------------------------
-# Основной сканер (одноразовая проверка для каждой итерации)
+# Основной сканер (одна итерация)
 # ------------------------------
-async def scanner_loop(app):
-    # перебираем markets и формируем список общих валидных пар
+async def scanner_iteration(app):
+    # собираем пары /USDT для каждой биржи
     exchange_pairs = {}
     for ex_name, ex in exchanges.items():
         try:
@@ -264,7 +281,7 @@ async def scanner_loop(app):
             exchange_pairs[ex_name] = set()
             print(f"❌ Ошибка {ex_name}: {e}")
 
-    # общие пары, которые есть минимум на двух биржах
+    # сопоставляем символы к биржам
     symbol_map = {}
     for ex_name, pairs in exchange_pairs.items():
         for s in pairs:
@@ -273,10 +290,9 @@ async def scanner_loop(app):
     common_symbols = sorted(common_symbols)[:MAX_COINS]
     print(f"🔍 Выбрано {len(common_symbols)} общих пар /USDT (лимит {MAX_COINS})")
 
-    # для каждой пары проверяем пары бирж
+    # для каждой общей пары перебираем buy/sell
     for symbol in common_symbols:
         ex_list = symbol_map[symbol]
-        # переберём пары buy/sell
         for buy_ex in ex_list:
             for sell_ex in ex_list:
                 if buy_ex == sell_ex:
@@ -293,65 +309,54 @@ async def scanner_loop(app):
                 if ask_price <= 0:
                     continue
                 spread = (bid_price - ask_price) / ask_price
-                # объём в USD приблизительно
-                vol_buy = ask_price * ask_amt
-                vol_sell = bid_price * bid_amt
-                approx_vol = max(orderbook_volume_usd(exchanges[buy_ex], symbol), orderbook_volume_usd(exchanges[sell_ex], symbol))
-                # фильта по объёму и спреду
+                approx_vol = max(orderbook_volume_usd(exchanges[buy_ex], symbol),
+                                 orderbook_volume_usd(exchanges[sell_ex], symbol))
                 if approx_vol < MIN_VOLUME_USD:
                     continue
                 if spread < SPREAD_THRESHOLD:
                     continue
-                # сформировать сообщение
+
                 now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
                 text = (f"🔥Арбитраж! {symbol}\n"
                         f"Купить: {buy_ex} → {ask_price:.6f}\n"
                         f"Продать: {sell_ex} → {bid_price:.6f}\n"
                         f"СПРЕД: {spread*100:.4f}%\n"
                         f"Объём (USD): {approx_vol:.2f}\n"
-                        f"Проверить актуальность: (кнопка ниже)\n"
                         f"Время: {now}")
                 print(text)
-                # отправляем сигнал всем в whitelist
                 await send_signal_to_whitelist(app, text, symbol, buy_ex, sell_ex, spread)
-    # конец одной итерации
 
 # ------------------------------
-# Запуск бота и планировщик
+# Запуск Application и фонового цикла
 # ------------------------------
-async def main():
+def build_application():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    # регистрируем callback и команды
+    # хендлеры
     app.add_handler(CallbackQueryHandler(check_callback, pattern=r"^check\|"))
     app.add_handler(CommandHandler("add_user", cmd_add_user))
     app.add_handler(CommandHandler("remove_user", cmd_remove_user))
     app.add_handler(CommandHandler("list_users", cmd_list_users))
+    return app
 
-    # стартуем polling
-    await app.bot.set_my_commands([
-        ('add_user', 'Добавить пользователя в whitelist (admin/operator)'),
-        ('remove_user', 'Удалить пользователя (admin/operator)'),
-        ('list_users', 'Показать whitelist (admin/operator)')
-    ])
-    print("Бот Telegram запущен.")
+async def background_scanner(app):
+    # спящий цикл
+    while True:
+        try:
+            await scanner_iteration(app)
+        except Exception as e:
+            print("Ошибка в scanner_iteration:", e)
+        await asyncio.sleep(CHECK_INTERVAL)
 
-    # запускаем цикл сканера (в отдельном фоне)
-    async def loop():
-        while True:
-            try:
-                await scanner_loop(app)
-            except Exception as e:
-                print("Ошибка в scanner_loop:", e)
-            await asyncio.sleep(CHECK_INTERVAL)
+def main():
+    app = build_application()
 
-    import asyncio
-    # запускаем фоновую задачу сканера и сам polling
-    app.create_task(loop())
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling() if hasattr(app, 'updater') else None
-    await app.idle()
+    # создаём фоновую задачу до запуска polling
+    app.create_task(background_scanner(app))
+
+    # Рекомендованный способ запуска: run_polling (блокирует поток, сам управляет loop)
+    print("Запуск бота...")
+    app.run_polling()
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    main()
+
