@@ -1,0 +1,5 @@
+[build]
+runtime = "python"
+
+[packages]
+python = "3.10"
