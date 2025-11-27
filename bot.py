@@ -1,4 +1,7 @@
 # bot.py — арбитражный Telegram-бот (без ИИ/API)
+# Совместимая конфигурация: python-telegram-bot v20.3 (с job-queue)
+# Установи зависимости: python-telegram-bot[job-queue]==20.3 ccxt pandas requests
+
 import os
 import ccxt
 import time
@@ -9,31 +12,28 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
-    ContextTypes,
     CallbackQueryHandler,
+    ContextTypes,
 )
 
 # ------------------------------
-# Настройка: укажи токен либо через env vars, либо прямо здесь
+# Настройка: токен / id
 # ------------------------------
-# Вариант A (безопаснее): TELEGRAM_TOKEN в переменных окружения (Railway)
-TELEGRAM_TOKEN = "8546366016:AAEWSe8vsdlBhyboZzOgcPb8h9cDSj09A80"
-
-
-# Вариант B (быстрая проверка): можно прям вписать токен строкой (только временно!)
-# TELEGRAM_TOKEN = "1234567890:AAAABBBBBCCCC_DDDDD"  # <- если хочешь тестировать локально, раскомментируй и вставь сюда
+# Рекомендуемый способ — задать TELEGRAM_TOKEN в переменных окружения на Railway или хостинге.
+# Для быстрой проверки локально можно временно вставить токен прямо сюда (НЕ публикуй).
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")  # <- поставь токен в env vars
+# TELEGRAM_TOKEN = "1234567:ABC..."  # пример для локальной отладки (временно)
 
 if not TELEGRAM_TOKEN:
-    raise RuntimeError("❌ TELEGRAM_TOKEN не задан. Положи TELEGRAM_TOKEN в env vars или вставь в код.")
+    raise RuntimeError("❌ TELEGRAM_TOKEN не задан. Положи TELEGRAM_TOKEN в env vars или вставь в код для теста.")
 
-# OWNER_CHAT_ID и OPERATOR_ID — можно задать через env или прямо в коде
-OWNER_CHAT_ID = int(os.environ.get("OWNER_CHAT_ID", "0"))     # <- твой Telegram ID (владелец)
-OPERATOR_ID = int(os.environ.get("OPERATOR_ID", "0"))         # <- оператор (может управлять whitelist)
+OWNER_CHAT_ID = int(os.environ.get("OWNER_CHAT_ID", "0"))     # твой TG id (владелец)
+OPERATOR_ID = int(os.environ.get("OPERATOR_ID", "0"))         # id оператора
 
 # ------------------------------
-# Биржи и параметры (настроить по желанию)
+# Биржи и параметры (можно менять через env)
 # ------------------------------
-EXCHANGE_IDS = ['kucoin', 'bitrue', 'bitmart', 'gateio', 'poloniex']  # как ты просил (5 бирж)
+EXCHANGE_IDS = os.environ.get("EXCHANGES", "kucoin,bitrue,bitmart,gateio,poloniex").split(",")
 SPREAD_THRESHOLD = float(os.environ.get("SPREAD_THRESHOLD", 0.015))  # 1.5%
 MIN_VOLUME_USD = float(os.environ.get("MIN_VOLUME_USD", 1500))       # 1500 USDT
 MAX_COINS = int(os.environ.get("MAX_COINS", 150))                    # 150 пар
@@ -46,6 +46,9 @@ DB_FILE = os.environ.get("ARBI_DB", "arbi_data.db")
 # ------------------------------
 exchanges = {}
 for ex_id in EXCHANGE_IDS:
+    ex_id = ex_id.strip()
+    if not ex_id:
+        continue
     try:
         ex_cls = getattr(ccxt, ex_id)
         exchanges[ex_id] = ex_cls({'enableRateLimit': True})
@@ -54,7 +57,7 @@ for ex_id in EXCHANGE_IDS:
         print(f"Ошибка инициализации {ex_id}: {e}")
 
 # ------------------------------
-# БД (SQLite) — whitelist и signals
+# SQLite (whitelist, signals)
 # ------------------------------
 conn = sqlite3.connect(DB_FILE, check_same_thread=False)
 cur = conn.cursor()
@@ -78,7 +81,7 @@ CREATE TABLE IF NOT EXISTS signals (
 conn.commit()
 
 # ------------------------------
-# Утилиты: whitelist
+# Утилиты whitelist
 # ------------------------------
 def is_whitelisted(tg_id: int) -> bool:
     cur.execute("SELECT 1 FROM whitelist WHERE tg_id=?", (tg_id,))
@@ -98,7 +101,7 @@ def list_whitelist():
     return cur.fetchall()
 
 # ------------------------------
-# Фильтрация символов (USDT только, без левереджа и ETF)
+# Валидация символов (USDT и фильтр "мусора")
 # ------------------------------
 def is_valid_symbol(symbol: str) -> bool:
     if not symbol.endswith("/USDT"):
@@ -114,23 +117,22 @@ def is_valid_symbol(symbol: str) -> bool:
     return True
 
 # ------------------------------
-# Объём приблизительно (top-3 уровней)
+# Объём по top-3 уровней (синхронно и асинхронно)
 # ------------------------------
-async def orderbook_volume_usd_async(exchange, symbol):
+def orderbook_volume_usd(exchange, symbol):
     try:
-        ob = await asyncio.to_thread(exchange.fetch_order_book, symbol, 5)
-        bid_vol = sum([p * a for p, a in ob.get('bids', [])[:3]])
-        ask_vol = sum([p * a for p, a in ob.get('asks', [])[:3]])
+        ob = exchange.fetch_order_book(symbol, limit=5)
+        bid_vol = sum([p*a for p,a in ob.get('bids', [])[:3]])
+        ask_vol = sum([p*a for p,a in ob.get('asks', [])[:3]])
         return max(bid_vol, ask_vol)
     except Exception:
         return 0.0
 
-def orderbook_volume_usd(exchange, symbol):
-    # синхронная версия (на случай вызова внутри sync контекста)
+async def orderbook_volume_usd_async(exchange, symbol):
     try:
-        ob = exchange.fetch_order_book(symbol, 5)
-        bid_vol = sum([p * a for p, a in ob.get('bids', [])[:3]])
-        ask_vol = sum([p * a for p, a in ob.get('asks', [])[:3]])
+        ob = await asyncio.to_thread(exchange.fetch_order_book, symbol, 5)
+        bid_vol = sum([p*a for p,a in ob.get('bids', [])[:3]])
+        ask_vol = sum([p*a for p,a in ob.get('asks', [])[:3]])
         return max(bid_vol, ask_vol)
     except Exception:
         return 0.0
@@ -140,7 +142,8 @@ def orderbook_volume_usd(exchange, symbol):
 # ------------------------------
 async def send_signal_to_whitelist(app, text, symbol, buy_ex, sell_ex, initial_spread):
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Проверить спред", callback_data=f"check|{symbol}|{buy_ex}|{sell_ex}")]
+        [InlineKeyboardButton("Проверить спред", callback_data=f"check|{symbol}|{buy_ex}|{sell_ex}")],
+        [InlineKeyboardButton("Поддержка", url="https://t.me/Arbitr_IP")]
     ])
     cur.execute("INSERT INTO signals (symbol, buy_ex, sell_ex, initial_spread, initial_time) VALUES (?, ?, ?, ?, ?)",
                 (symbol, buy_ex, sell_ex, float(initial_spread), datetime.now(timezone.utc).isoformat()))
@@ -148,7 +151,13 @@ async def send_signal_to_whitelist(app, text, symbol, buy_ex, sell_ex, initial_s
     cur.execute("SELECT tg_id FROM whitelist")
     rows = cur.fetchall()
     if not rows:
-        print("Whitelist пуст — сигнал не будет разослан.")
+        # если whitelist пуст — отправим владельцу (чтобы не терялись сигналы)
+        if OWNER_CHAT_ID and OWNER_CHAT_ID != 0:
+            try:
+                await app.bot.send_message(chat_id=OWNER_CHAT_ID, text=f"Сигнал найден, но whitelist пуст:\n{text}")
+            except Exception as e:
+                print("Не могу отправить владельцу:", e)
+        return
     for (tg_id,) in rows:
         try:
             await app.bot.send_message(chat_id=tg_id, text=text, reply_markup=keyboard)
@@ -231,8 +240,22 @@ async def check_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.message.reply_text(text)
 
 # ------------------------------
-# Команды управления whitelist
+# Команды: /start, /add_user, /remove_user, /list_users
 # ------------------------------
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # реферальная ссылка: https://t.me/<bot_username>?start=<user_id>
+    user_id = update.effective_user.id
+    bot = context.bot
+    me = await bot.get_me()
+    bot_username = me.username or "this_bot"
+    ref_link = f"https://t.me/{bot_username}?start={user_id}"
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Моя рефссылка", url=ref_link)],
+        [InlineKeyboardButton("Проверить один спред", callback_data="manual_check")],
+        [InlineKeyboardButton("Поддержка", url="https://t.me/Arbitr_IP")]
+    ])
+    await update.message.reply_text("Добро пожаловать! Используй кнопки ниже.", reply_markup=keyboard)
+
 async def cmd_add_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caller = update.effective_user.id
     if caller not in (OWNER_CHAT_ID, OPERATOR_ID):
@@ -276,11 +299,10 @@ async def cmd_list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(txt)
 
 # ------------------------------
-# Основной сканер (одна итерация). ВНИМАНИЕ: использует asyncio.to_thread для вызовов ccxt
+# Основной сканер (одна итерация) — асинхронно вызывает ccxt через asyncio.to_thread
 # ------------------------------
 async def scanner_iteration(app):
     exchange_pairs = {}
-    # получаем markets (в потоках)
     for ex_name, ex in exchanges.items():
         try:
             markets = await asyncio.to_thread(ex.load_markets)
@@ -291,7 +313,6 @@ async def scanner_iteration(app):
             exchange_pairs[ex_name] = set()
             print(f"❌ Ошибка {ex_name}: {e}")
 
-    # сопоставляем символы к биржам
     symbol_map = {}
     for ex_name, pairs in exchange_pairs.items():
         for s in pairs:
@@ -300,7 +321,6 @@ async def scanner_iteration(app):
     common_symbols = sorted(common_symbols)[:MAX_COINS]
     print(f"🔍 Выбрано {len(common_symbols)} общих пар /USDT (лимит {MAX_COINS})")
 
-    # Перебираем пары (важно: тяжёлая часть — выполняется в потоках)
     for symbol in common_symbols:
         ex_list = symbol_map[symbol]
         for buy_ex in ex_list:
@@ -325,7 +345,6 @@ async def scanner_iteration(app):
                     continue
                 if spread < SPREAD_THRESHOLD:
                     continue
-
                 now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
                 text = (f"🔥Арбитраж! {symbol}\n"
                         f"Купить: {buy_ex} → {ask_price:.6f}\n"
@@ -337,31 +356,37 @@ async def scanner_iteration(app):
                 await send_signal_to_whitelist(app, text, symbol, buy_ex, sell_ex, spread)
 
 # ------------------------------
-# Старт бота и job_queue (без create_task)
+# Job callback (ptb ожидает job_callback(context))
+# ------------------------------
+async def job_callback(context: ContextTypes.DEFAULT_TYPE):
+    # context.application передаёт Application
+    await scanner_iteration(context.application)
+
+# ------------------------------
+# Собираем приложение и запускаем polling
 # ------------------------------
 def build_application():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CallbackQueryHandler(check_callback, pattern=r"^check\|"))
+    # хендлеры
+    app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("add_user", cmd_add_user))
     app.add_handler(CommandHandler("remove_user", cmd_remove_user))
     app.add_handler(CommandHandler("list_users", cmd_list_users))
+    app.add_handler(CallbackQueryHandler(check_callback, pattern=r"^check\|"))
     return app
 
 def main():
     app = build_application()
-    # регистрируем периодическую задачу через job_queue — так корректно для ptb
-    # job callback должен быть async function(app) -> но ptb ожидает callback(job_context)
-    async def job_callback(context: ContextTypes.DEFAULT_TYPE):
-        # context.bot доступен, но передадим весь app (context.application)
-        await scanner_iteration(context.application)
 
-    # интервал в секундах (CHECK_INTERVAL). first=5 — старт через 5 сек после запуска
-    app.job_queue.run_repeating(job_callback, interval=CHECK_INTERVAL, first=5)
+    # регистрируем периодическую задачу через job_queue
+    # (job_queue создаётся внутри Application при установке PTB с job-queue extras)
+    if app.job_queue is None:
+        print("⚠️ job_queue отсутствует — убедись, что установил python-telegram-bot[job-queue].")
+    else:
+        app.job_queue.run_repeating(job_callback, interval=CHECK_INTERVAL, first=5)
 
     print("Запуск бота...")
     app.run_polling()
 
 if __name__ == "__main__":
     main()
-
-
